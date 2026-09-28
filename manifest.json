@@ -1,0 +1,9 @@
+{
+    "version": "0.1",
+    "type": 3,
+    "order": 5,
+    "author": "Gary Venter",
+    "author_uri": "https:\/\/github.com\/gizulor\/",
+    "description": "Search and replace a term across an allowlisted set of Textpattern tables\/columns",
+    "flags": 0
+}

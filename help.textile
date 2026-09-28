@@ -1,0 +1,165 @@
+h1. all_search_replace
+
+Search and replace a term across an allowlisted set of Textpattern tables/columns, from a single admin tab, with a preview step before anything is written.
+
+Flow: search (read-only) -> tick rows + enter a replacement -> preview (read-only, re-fetches current values) -> confirm -> replace (writes, requires the TXP CSRF token).
+
+Restricted to Publisher (privs level 1) by default.
+
+h2. Before you start: back up the database
+
+This plugin writes directly to the database, bypassing Textpattern's normal edit forms, and can change hundreds of rows in a single click. The change log (see below) records every value it overwrites, but it is not a substitute for a backup.
+
+*Take a full database backup before every replace or bulk assignment session.* For example:
+
+bc. mysqldump --single-transaction -u USER -p DATABASE > txp-backup-$(date +%Y%m%d-%H%M).sql
+
+Test the replacement on a single row first, check the result on the front end, then run it across the rest.
+
+h2. Overview
+
+The plugin adds an *Extensions > Search & Replace* tab with three tools:
+
+# *Search & replace* -- find a term across articles, custom fields, categories, sections, images and links, pick which matches to change, preview, then confirm.
+# *Bulk field assignment* -- for every article matching a set of filters, set, add to, or remove from a custom field or category.
+# *Change log* -- an audit trail of every value written by either tool, with the old and new value, who made the change and when.
+
+Nothing is written until you have seen a preview and confirmed it. Both the preview and the final write re-read each row from the database first, so if someone edits a row in the meantime, that row is skipped rather than overwritten.
+
+h2. What gets searched
+
+Only the tables and columns in the allowlist are searched. The default list is:
+
+|_. Table |_. Columns |_. Key |
+| @textpattern@ | Title, Body, Body_html, Excerpt, Excerpt_html, plus every custom field in use | ID |
+| @txp_category@ | title | id |
+| @txp_section@ | title | name |
+| @txp_image@ | caption, alt | id |
+| @txp_link@ | url, linkname, description | id |
+
+Custom fields (the standard 1-10 plus any added by glz_custom_fields) are found automatically, and are labelled with their field name rather than @custom_N@.
+
+If an allowlisted column doesn't exist on this install, it is skipped and listed under the search form rather than stopping the search.
+
+h2. Search & replace
+
+h3. 1. Search (read-only)
+
+* *Search term* -- a plain substring match (no wildcards or regular expressions).
+* *Case sensitive* -- off by default. Case-insensitive search matches every case variant (e.g. @stone@, @Stone@, @STONE@), and they are all replaced with exactly the replacement text you enter.
+* *Filters* (optional) -- narrow the search to articles in a given:
+** *Section*
+** *Category* -- matches Category 1 or Category 2
+** *Custom field* value -- exact match on one choice for select/checkbox/radio fields, substring match for textarea fields
+
+Filters only apply to articles. When any filter is set, the non-article tables (categories, sections, images, links) are left out of the search rather than searched without the filter.
+
+If you set a filter but leave the search term empty, you get the filtered article list instead (the same list used by bulk field assignment).
+
+h3. 2. Pick rows
+
+Each match shows its table, column and row, plus the article's status, section and category, a snippet of text around the match, and an *edit* link that opens the row in the normal Textpattern editor (articles, images and links). Tick the rows to change -- or use the header checkbox to select all -- enter the *Replace with* text, and choose *Preview*.
+
+Leaving *Replace with* empty deletes the term.
+
+h3. 3. Preview (read-only)
+
+Shows each ticked row's before and after. Rows that have been deleted, or no longer contain the term because they were edited after the search, are flagged and left out of the confirm step. Nothing has been written at this point.
+
+h3. 4. Confirm and replace
+
+Writes the changes. For each row it:
+
+* re-reads the current value and skips the row if it has gone or no longer contains the term
+* applies the replacement
+* also applies it to @Body_html@ when @Body@ is changed, and @Excerpt_html@ when @Excerpt@ is changed, in the same update, so the front end shows the new text straight away
+* sets the article's *Last modified* date and author to now and you
+* records each changed column in the change log
+
+The site-wide last-modified timestamp is updated once afterwards, so caches and feeds pick up the change.
+
+The results page lists what was updated, and anything skipped with the reason.
+
+h3. Select-list custom fields
+
+glz_custom_fields stores select, multi-select, checkbox and radio values as a @|@-separated list (e.g. @Bianco|Molitor|Beige@). For these fields the plugin matches whole choices only:
+
+* searching for @Molitor@ will not match @MolitorGrande@
+* replacing @Molitor@ with nothing removes that choice cleanly, leaving @Bianco|Beige@ rather than @Bianco||Beige@
+
+Textarea custom fields and all the standard columns use ordinary substring matching.
+
+h2. Bulk field assignment
+
+For changing a field on many articles at once when the existing values vary -- e.g. "put every article in section _porcelain_ into collection _Terrazzo_". There is no search term: the articles are chosen by filters.
+
+# Choose *Bulk field assignment* from the search page.
+# Set a Section, Category and/or custom field filter. Matching articles are listed with edit links -- tick the ones to change.
+# Choose the *field* to set (any custom field, Category 1 or Category 2), a *value*, and a *mode*:
+** *Add to existing values* -- adds the choice(s) if not already present (select-list fields only)
+** *Remove from existing values* -- removes the choice(s) if present (select-list fields only)
+** *Replace entire value* -- overwrites whatever is there. Text fields and categories always use this mode.
+For select-list fields, several choices can be entered at once, separated by @|@.
+# Preview the before and after, then confirm.
+
+The same safeguards apply as for search & replace: each row is re-read before writing, and every change is recorded in the change log (the search term column shows @bulk add@, @bulk remove@ or @bulk replace@).
+
+h2. Change log
+
+*View change log* on the search page shows the 200 most recent changes, newest first: when, who, table, column, row, search term, replacement, and the first 120 characters of the old and new values.
+
+The full log is kept in the @all_search_replace_log@ table (created automatically the first time it's needed). It keeps every change and the full old and new values, not just what the admin page shows. Each changed column gets its own row, so replacing in @Body@ also logs the matching @Body_html@ change separately.
+
+Columns: @id@, @changed_at@, @changed_by@, @table@, @column@, @row_key@, @old_value@, @new_value@, @search_term@, @replace_with@.
+
+h3. Reverting changes from the log
+
+There's no undo button, but the log holds everything needed to put values back. The query below doesn't change anything -- it *generates* one @UPDATE@ statement per logged change, which you can check and then run.
+
+Adjust the @WHERE@ clause to pick out the changes you want to revert: by search term, by date/time, by user, or by a range of log @id@s.
+
+bc.. SELECT CONCAT(
+    'UPDATE `', l.`table`, '`',
+    ' SET `', l.`column`, '` = ', QUOTE(l.old_value),
+    ' WHERE `',
+        CASE l.`table`
+            WHEN 'textpattern' THEN 'ID'
+            WHEN 'txp_section' THEN 'name'
+            ELSE 'id'
+        END,
+    '` = ', QUOTE(l.row_key),
+    ' AND `', l.`column`, '` = ', QUOTE(l.new_value),
+    ';'
+) AS revert_sql
+FROM all_search_replace_log l
+WHERE l.search_term = 'Molitor'
+  AND l.replace_with = 'Molitor Grande'
+  AND l.changed_at >= '2026-09-29 00:00:00'
+ORDER BY l.id DESC;
+
+p. Notes:
+
+* *Back up first* -- reverting is a write too.
+* The @AND `column` = new_value@ condition means a row is only reverted if it still holds the value the plugin wrote. If it has been edited since, the statement changes nothing, so later edits aren't lost. Check the "rows affected" count to spot these.
+* Keep the @ORDER BY l.id DESC@. If the same row was changed more than once, the changes must be undone newest first.
+* @Body_html@ / @Excerpt_html@ rows are in the log too, so they are reverted along with @Body@ / @Excerpt@.
+* If your Textpattern install uses a table prefix, add it to the log table name in the @FROM@ line, and to the table name in the generated statements (e.g. @CONCAT('UPDATE `txp_', l.`table`, ...@).
+* Reverting doesn't restore an article's previous *Last modified* date.
+* If you added tables to the allowlist, add their key columns to the @CASE@ too.
+
+h2. Things to watch
+
+* *Textile and HTML* -- the replacement is applied to both the Textile source (@Body@) and its rendered HTML (@Body_html@) as plain text. If Textile renders the term differently (smart quotes, @&@ as @&amp;@, a term split by markup), the HTML copy may not match. Check the article on the front end, and if it's out of step, open and re-save it in the article editor to rebuild the HTML.
+* *Markup and URLs* -- a plain substring match will also change the term inside links, image paths, tag attributes and Textile markup. Check the context snippets before ticking rows.
+* *Short terms* -- a short term matches inside longer words (@tile@ also matches @textile@ and @tiles@). Use case-sensitive mode and a longer, more specific term where possible.
+* *Other plugins and caches* -- changes are made directly in the database, so plugins that react to the article editor's save event won't know about them.
+
+h2. Configuration
+
+Settings are edited in the plugin code, near the top of the file:
+
+* @$GLOBALS['all_search_replace_tables']@ -- the allowlist of tables, their key column, and the columns to search. Only add columns that hold plain free text.
+* @$GLOBALS['all_search_replace_html_mirrors']@ -- pairs of source/rendered columns that are always changed together.
+* @$GLOBALS['all_search_replace_edit_links']@ -- the edit link used for each table's rows.
+* @$GLOBALS['all_search_replace_custom_labels']@ -- override the display name of a custom field, e.g. @'custom_11' => 'Collection'@.
+* @add_privs('all_search_replace', '1')@ -- which user roles can use the tab. Publisher only by default; e.g. @'1,2'@ adds Managing Editors.
